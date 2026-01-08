@@ -1,0 +1,28 @@
+{
+  "registry-mirrors": ["https://ustc-edu-cn.mirror.aliyuncs.com"],
+  "debug": false,
+  "insecure-registries": [
+    "0.0.0.0/0"
+  ],
+  "ip-forward": true,
+  "ipv6": false,
+  "live-restore": true,
+  "log-driver": "json-file",
+  "log-level": "warn",
+  "log-opts": {
+    "max-size": "100m",
+    "max-file": "2"
+  },
+  "selinux-enabled": false,
+  "experimental" : true,
+  "storage-driver": "overlay2",
+  "data-root": "/data/docker",
+  "default-ulimits": {
+    "nofile": {
+      "Name": "nofile",
+      "Hard": 65536,
+      "Soft": 65536
+    }
+  },
+  "exec-opts": ["native.cgroupdriver=systemd"]
+}

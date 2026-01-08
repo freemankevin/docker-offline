@@ -1,0 +1,140 @@
+name: Update Docker Offline Packages
+
+on:
+  # 每周一凌晨 2 点（UTC）自动运行
+  schedule:
+    - cron: '0 2 * * 1'
+  
+  # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      architectures:
+        description: '选择架构 (x86_64, aarch64, all)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - x86_64
+          - aarch64
+  
+  # 当推送到 main 分支且包含 update-packages 标签时触发
+  push:
+    tags:
+      - 'update-packages-*'
+
+jobs:
+  update-docker-packages:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout 仓库
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: 检查是否需要更新
+        id: check_update
+        run: |
+          echo "检查当前版本信息..."
+          
+          if [ -f "packages/VERSION.json" ]; then
+            CURRENT_VERSION=$(python3 -c "import json; print(json.load(open('packages/VERSION.json'))['docker_version'])")
+            echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+            echo "当前 Docker 版本: $CURRENT_VERSION"
+          else
+            echo "current_version=none" >> $GITHUB_OUTPUT
+            echo "未找到版本文件，将执行首次下载"
+          fi
+          
+          # 获取最新版本
+          LATEST_VERSION=$(curl -s https://api.github.com/repos/moby/moby/releases/latest | python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'].lstrip('v'))")
+          echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "最新 Docker 版本: $LATEST_VERSION"
+          
+          if [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
+            echo "need_update=true" >> $GITHUB_OUTPUT
+            echo "✓ 发现新版本，需要更新"
+          else
+            echo "need_update=false" >> $GITHUB_OUTPUT
+            echo "✗ 已是最新版本，跳过更新"
+          fi
+      
+      - name: 运行更新脚本
+        if: steps.check_update.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          # 确定架构参数
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            ARCH="${{ github.event.inputs.architectures }}"
+          else
+            ARCH="all"
+          fi
+          
+          echo "开始更新 Docker 离线包 (架构: $ARCH)..."
+          
+          # 创建输出目录
+          mkdir -p packages
+          
+          # 运行更新脚本
+          python3 scripts/update.py -o packages -a $ARCH --ci
+          
+          echo "更新完成"
+      
+      - name: 读取版本信息
+        if: steps.check_update.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch'
+        id: read_versions
+        run: |
+          DOCKER_VERSION=$(python3 -c "import json; print(json.load(open('packages/VERSION.json'))['docker_version'])")
+          COMPOSE_VERSION=$(python3 -c "import json; print(json.load(open('packages/VERSION.json'))['compose_version'])")
+          UPDATE_DATE=$(python3 -c "import json; print(json.load(open('packages/VERSION.json'))['update_date'])")
+          echo "docker_version=$DOCKER_VERSION" >> $GITHUB_OUTPUT
+          echo "compose_version=$COMPOSE_VERSION" >> $GITHUB_OUTPUT
+          echo "update_date=$UPDATE_DATE" >> $GITHUB_OUTPUT
+      
+      - name: 提交更改
+        if: steps.check_update.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch'
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          git add packages/
+          
+          # 检查是否有更改
+          if git diff --staged --quiet; then
+            echo "没有文件更改，跳过提交"
+            exit 0
+          fi
+          
+          git commit -m "chore: 更新 Docker 离线包到 ${{ steps.generate_report.outputs.docker_version }}"
+          git push
+      
+      - name: 创建 GitHub Release
+        if: steps.check_update.outputs.need_update == 'true'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.read_versions.outputs.docker_version }}
+          name: Docker ${{ steps.read_versions.outputs.docker_version }}
+          body: |
+            Docker 离线包更新
+            - Docker: ${{ steps.read_versions.outputs.docker_version }}
+            - Compose: ${{ steps.read_versions.outputs.compose_version }}
+            - 更新时间: ${{ steps.read_versions.outputs.update_date }}
+          files: |
+            packages/docker-*.tgz
+            packages/docker-compose-linux-*
+            packages/docker-rootless-extras-*.tgz
+            packages/VERSION.json
+            packages/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 通知更新完成
+        if: steps.check_update.outputs.need_update == 'true'
+        run: |
+          echo "✅ Docker 离线包已更新到版本 ${{ steps.read_versions.outputs.docker_version }}"
+          echo "📦 Release 已创建: https://github.com/${{ github.repository }}/releases/tag/v${{ steps.read_versions.outputs.docker_version }}"

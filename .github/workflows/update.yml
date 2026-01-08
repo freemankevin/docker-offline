@@ -11,7 +11,11 @@ on:
         type: choice
         options: [all, x86_64, aarch64]
   push:
-    tags: ['update-packages-*']
+    branches: [main, master]
+    paths:
+      - 'packages/scripts/**'
+      - 'packages/services/**'
+      - '.github/workflows/update.yml'
 
 jobs:
   update:
@@ -34,13 +38,13 @@ jobs:
           echo "need_update=$([[ "$CURRENT" != "$LATEST" ]] && echo true || echo false)" >> $GITHUB_OUTPUT
       
       - name: 下载更新
-        if: steps.check.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch'
+        if: steps.check.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         run: |
           ARCH=${{ github.event.inputs.architectures || 'all' }}
-          python3 scripts/update.py -o packages -a $ARCH --ci
+          python3 packages/scripts/update.py -o packages -a $ARCH --ci
       
       - name: 读取版本
-        if: steps.check.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch'
+        if: steps.check.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         id: version
         run: |
           VERSION=$(python3 -c "import json; d=json.load(open('packages/VERSION.json')); print(d['docker_version']); print(d['compose_version'])")
@@ -48,15 +52,13 @@ jobs:
           echo "compose=$(echo $VERSION | awk 'NR==2')" >> $GITHUB_OUTPUT
       
       - name: 打包
-        if: steps.check.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch'
+        if: steps.check.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         id: package
         run: |
           NAME="docker-offline-v${{ steps.version.outputs.docker }}"
           mkdir -p "release/$NAME/packages"
           
           cp -r packages/* "release/$NAME/packages/"
-          cp -r scripts "release/$NAME/packages/"
-          cp -r services "release/$NAME/packages/"
           cp README.md "release/$NAME/"
           
           cd release

@@ -20,8 +20,12 @@ on:
 jobs:
   update:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 明确声明权限
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整历史，便于版本比较
       
       - uses: actions/setup-python@v5
         with:
@@ -30,32 +34,68 @@ jobs:
       - name: 检查更新
         id: check
         run: |
-          CURRENT=$(python3 -c "import json; print(json.load(open('packages/VERSION.json'))['docker_version'])" 2>/dev/null || echo "none")
-          LATEST=$(curl -s https://api.github.com/repos/moby/moby/releases/latest | python3 -c "import sys,json,re; print(re.search(r'\d+\.\d+\.\d+', json.load(sys.stdin)['tag_name']).group())")
+          # 检查 VERSION.json 是否存在
+          if [ -f "packages/VERSION.json" ]; then
+            CURRENT=$(python3 -c "import json; print(json.load(open('packages/VERSION.json'))['docker_version'])" 2>/dev/null || echo "none")
+          else
+            CURRENT="none"
+            echo "⚠️ VERSION.json 不存在，这可能是首次运行"
+          fi
+          
+          # 获取最新版本，增加错误处理
+          LATEST=$(curl -s --fail https://api.github.com/repos/moby/moby/releases/latest | \
+                   python3 -c "import sys,json,re; data=json.load(sys.stdin); print(re.search(r'\d+\.\d+\.\d+', data['tag_name']).group())" 2>/dev/null || echo "error")
+          
+          if [ "$LATEST" = "error" ]; then
+            echo "❌ 获取最新版本失败，可能是网络问题或 API 限制"
+            exit 1
+          fi
+          
+          echo "当前版本: $CURRENT"
+          echo "最新版本: $LATEST"
           
           echo "current_version=$CURRENT" >> $GITHUB_OUTPUT
           echo "latest_version=$LATEST" >> $GITHUB_OUTPUT
-          echo "need_update=$([[ "$CURRENT" != "$LATEST" ]] && echo true || echo false)" >> $GITHUB_OUTPUT
+          
+          # 判断是否需要更新
+          if [ "$CURRENT" != "$LATEST" ]; then
+            echo "need_update=true" >> $GITHUB_OUTPUT
+            echo "✅ 需要更新到 $LATEST"
+          else
+            echo "need_update=false" >> $GITHUB_OUTPUT
+            echo "✅ 已是最新版本"
+          fi
       
       - name: 下载更新
         if: steps.check.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         run: |
           ARCH=${{ github.event.inputs.architectures || 'all' }}
+          echo "开始下载架构: $ARCH"
           python3 packages/scripts/update.py -o packages -a $ARCH --ci
       
       - name: 读取版本
         if: steps.check.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         id: version
         run: |
-          VERSION=$(python3 -c "import json; d=json.load(open('packages/VERSION.json')); print(d['docker_version']); print(d['compose_version'])")
-          echo "docker=$(echo $VERSION | awk 'NR==1')" >> $GITHUB_OUTPUT
-          echo "compose=$(echo $VERSION | awk 'NR==2')" >> $GITHUB_OUTPUT
+          if [ ! -f "packages/VERSION.json" ]; then
+            echo "❌ VERSION.json 不存在，下载可能失败"
+            exit 1
+          fi
+          
+          DOCKER_VER=$(python3 -c "import json; print(json.load(open('packages/VERSION.json'))['docker_version'])")
+          COMPOSE_VER=$(python3 -c "import json; print(json.load(open('packages/VERSION.json'))['compose_version'])")
+          
+          echo "docker=$DOCKER_VER" >> $GITHUB_OUTPUT
+          echo "compose=$COMPOSE_VER" >> $GITHUB_OUTPUT
+          echo "Docker: $DOCKER_VER, Compose: $COMPOSE_VER"
       
       - name: 打包
         if: steps.check.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         id: package
         run: |
           NAME="docker-offline-v${{ steps.version.outputs.docker }}"
+          echo "创建发布包: $NAME"
+          
           mkdir -p "release/$NAME/packages"
           
           cp -r packages/* "release/$NAME/packages/"
@@ -67,16 +107,24 @@ jobs:
           
           echo "name=$NAME" >> $GITHUB_OUTPUT
           echo "file=$NAME.tar.gz" >> $GITHUB_OUTPUT
+          echo "✅ 打包完成"
       
-      - name: 提交
+      - name: 提交代码
         if: steps.check.outputs.need_update == 'true' || github.event_name == 'workflow_dispatch'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add packages/
-          git diff --staged --quiet || (git commit -m "chore: update to v${{ steps.version.outputs.docker }}" && git push)
+          
+          if git diff --staged --quiet; then
+            echo "没有变更需要提交"
+          else
+            git commit -m "chore: update to Docker v${{ steps.version.outputs.docker }}"
+            git push
+            echo "✅ 代码已提交"
+          fi
       
-      - name: 发布
+      - name: 创建 Release
         if: steps.check.outputs.need_update == 'true'
         uses: softprops/action-gh-release@v2
         with:
@@ -86,18 +134,33 @@ jobs:
             **Docker**: `${{ steps.version.outputs.docker }}`
             **Compose**: `${{ steps.version.outputs.compose }}`
             
+            ## 📥 安装说明
+            
             ```bash
+            # 下载离线包
             wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.docker }}/${{ steps.package.outputs.file }}
+            
+            # 验证校验和（可选）
+            wget https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.docker }}/${{ steps.package.outputs.file }}.sha256
+            sha256sum -c ${{ steps.package.outputs.file }}.sha256
+            
+            # 解压并安装
             tar -xzf ${{ steps.package.outputs.file }}
             cd ${{ steps.package.outputs.name }}
             sudo bash packages/scripts/install.sh
             ```
+            
+            ## 📦 包含内容
+            - Docker Engine v${{ steps.version.outputs.docker }}
+            - Docker Compose v${{ steps.version.outputs.compose }}
+            - 支持架构: x86_64, aarch64
           files: |
             release/${{ steps.package.outputs.file }}
             release/${{ steps.package.outputs.file }}.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: 清理
-        if: always()
-        run: rm -rf release/
+      # 删除清理步骤 - 不需要手动清理，GitHub Actions 会自动清理
+      # - name: 清理
+      #   if: always()
+      #   run: rm -rf release/

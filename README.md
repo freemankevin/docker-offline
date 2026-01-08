@@ -1,6 +1,6 @@
-# offline-install-docker
+# docker-offline
 
-[![更新状态](https://github.com/freemankevin/offline-install-docker/actions/workflows/update.yml/badge.svg)](https://github.com/freemankevin/offline-install-docker/actions/workflows/update.yml)
+[![更新状态](https://github.com/freemankevin/docker-offline/actions/workflows/update.yml/badge.svg)](https://github.com/freemankevin/docker-offline/actions/workflows/update.yml)
 
 🚀 自动化维护的 Docker 离线安装包，支持 x86_64 和 ARM64 架构。
 
@@ -9,7 +9,7 @@
 
 ### 下载离线包
 
-前往 [Releases 页面](https://github.com/freemankevin/offline-install-docker/releases) 下载最新版本。
+前往 [Releases 页面](https://github.com/freemankevin/docker-offline/releases) 下载最新版本。
 
 ### 安装步骤
 

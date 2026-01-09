@@ -16,16 +16,29 @@ import argparse
 from datetime import datetime
 from pathlib import Path
 
+# ANSI 颜色代码 - VS Code 风格
+class Colors:
+    RESET = "\033[0m"
+    TIMESTAMP = "\033[0;90m"      # 灰色 - 时间戳
+    INFO = "\033[0;36m"           # 青色 - INFO
+    SUCCESS = "\033[0;32m"        # 绿色 - SUCCESS
+    WARNING = "\033[0;33m"        # 黄色 - WARNING
+    ERROR = "\033[0;31m"          # 红色 - ERROR
+    DEBUG = "\033[0;35m"          # 品红 - DEBUG
+    NOTICE = "\033[1;36m"         # 亮青色 - NOTICE
+    KEY = "\033[1;37m"            # 白色 - 关键信息
+    VALUE = "\033[0;32m"          # 绿色 - 值
+    DIMMED = "\033[0;37m"         # 淡白色 - 详细信息
+    BOLD = "\033[1m"              # 加粗
+
 class DockerUpdater:
     def __init__(self, output_dir="./packages", architectures=None, ci_mode=False):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
-        self.ci_mode = ci_mode  # CI 模式下输出更友好
+        self.ci_mode = ci_mode
         
-        # 支持的架构列表
         self.architectures = architectures or ["x86_64", "aarch64"]
         
-        # 架构映射
         self.arch_mapping = {
             "x86_64": {
                 "docker_arch": "x86_64",
@@ -39,15 +52,12 @@ class DockerUpdater:
             }
         }
         
-        # Docker 下载 URL 模板
         self.docker_url_template = "https://download.docker.com/linux/static/stable/{arch}/docker-{version}.tgz"
         self.compose_url_template = "https://github.com/docker/compose/releases/download/v{version}/docker-compose-linux-{arch}"
         self.rootless_url_template = "https://download.docker.com/linux/static/stable/{arch}/docker-rootless-extras-{version}.tgz"
         
-        # 日志文件
         self.log_file = self.output_dir / f"update_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
         
-        # 下载统计
         self.download_stats = {
             'success': 0,
             'failed': 0,
@@ -55,27 +65,47 @@ class DockerUpdater:
             'total_size': 0
         }
     
-    def log(self, message, level="INFO"):
-        """记录日志 (CI 模式下使用 GitHub Actions 格式)"""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    def log(self, message, level="INFO", icon=""):
+        """输出日志消息"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        level_padded = f"[{level:<7}]"
         
+        # 确定颜色
+        color_map = {
+            "INFO": Colors.INFO,
+            "SUCCESS": Colors.SUCCESS,
+            "WARNING": Colors.WARNING,
+            "ERROR": Colors.ERROR,
+            "DEBUG": Colors.DEBUG,
+            "NOTICE": Colors.NOTICE,
+        }
+        color = color_map.get(level, Colors.INFO)
+        
+        # 添加图标空格（仅当有图标时）
+        icon_str = f"{icon} " if icon else ""
+        
+        # 构建输出
         if self.ci_mode:
             # GitHub Actions 日志格式
             if level == "ERROR":
-                print(f"::error::{message}")
+                output = f"::error::{icon_str}{message}"
             elif level == "WARNING":
-                print(f"::warning::{message}")
+                output = f"::warning::{icon_str}{message}"
             elif level == "NOTICE":
-                print(f"::notice::{message}")
+                output = f"::notice::{icon_str}{message}"
             else:
-                print(f"[{timestamp}] {message}")
+                output = f"{Colors.TIMESTAMP}{timestamp}{Colors.RESET} {color}{level_padded}{Colors.RESET} {icon_str}{message}"
         else:
-            log_message = f"[{timestamp}] [{level}] {message}"
-            print(log_message)
+            output = f"{Colors.TIMESTAMP}{timestamp}{Colors.RESET} {color}{level_padded}{Colors.RESET} {icon_str}{message}"
         
-        # 写入日志文件
+        print(output)
+        
+        # 写入日志文件（移除颜色代码）
+        clean_message = message
+        for color_code in [Colors.KEY, Colors.VALUE, Colors.RESET, Colors.DIMMED]:
+            clean_message = clean_message.replace(color_code, "")
         with open(self.log_file, "a", encoding="utf-8") as f:
-            f.write(f"[{timestamp}] [{level}] {message}\n")
+            f.write(f"[{timestamp}] [{level}] {clean_message}\n")
     
     def set_output(self, name, value):
         """设置 GitHub Actions 输出变量"""
@@ -101,11 +131,10 @@ class DockerUpdater:
                 html = resp.read().decode()
             import re
             versions = re.findall(r'docker-(\d+\.\d+\.\d+)\.tgz', html)
-            # 去重并按版本排序
             versions = sorted(set(versions), key=lambda v: tuple(map(int, v.split('.'))), reverse=True)
             return versions
         except Exception as e:
-            self.log(f"列举静态版本失败: {e}", "ERROR")
+            self.log(f"列举静态版本失败: {e}", "ERROR", "✗")
             return []
     
     def list_rootless_versions(self, arch):
@@ -120,26 +149,25 @@ class DockerUpdater:
             versions = sorted(set(versions), key=lambda v: tuple(map(int, v.split('.'))), reverse=True)
             return versions
         except Exception as e:
-            self.log(f"列举 rootless 版本失败: {e}", "ERROR")
+            self.log(f"列举 rootless 版本失败: {e}", "ERROR", "✗")
             return []
     
     def resolve_static_version_for_arch(self, arch, desired_version):
-        # 如果目标版本存在则用目标，否则回退到索引中的最新版本
         docker_url = self.docker_url_template.format(arch=arch, version=desired_version)
         if self.check_url_exists(docker_url):
             return desired_version
         avail = self.list_static_versions(arch)
         if avail:
             fallback = avail[0]
-            self.log(f"目标版本 {desired_version} 不存在，{arch} 回退到可用版本 {fallback}", "WARNING")
+            self.log(f"目标版本 {Colors.KEY}{desired_version}{Colors.RESET} 不存在，{arch} 回退到可用版本 {Colors.VALUE}{fallback}{Colors.RESET}", "WARNING", "⊘")
             return fallback
-        self.log(f"{arch} 未发现任何可用静态版本，继续尝试目标版本 {desired_version}", "ERROR")
+        self.log(f"{arch} 未发现任何可用静态版本，继续尝试目标版本 {Colors.KEY}{desired_version}{Colors.RESET}", "ERROR", "✗")
         return desired_version
     
     def get_latest_docker_version(self):
         """获取最新的 Docker 版本号"""
         try:
-            self.log("正在获取最新 Docker 版本...")
+            self.log("正在获取最新 Docker 版本...", "INFO", "🔍")
             url = "https://api.github.com/repos/moby/moby/releases/latest"
             req = urllib.request.Request(url)
             req.add_header('User-Agent', 'Mozilla/5.0')
@@ -148,21 +176,20 @@ class DockerUpdater:
             with urllib.request.urlopen(req, timeout=30) as response:
                 data = json.loads(response.read().decode())
                 tag = data['tag_name']
-                # 兼容 tag 形式：v29.1.3、docker-v29.1.3、engine-v29.1.3 等
                 import re
                 m = re.search(r'(\d+\.\d+\.\d+)', tag)
                 version = m.group(1) if m else tag.lstrip('v').replace('docker-', '').replace('engine-', '')
-                self.log(f"找到最新 Docker 版本: {version}", "NOTICE")
+                self.log(f"找到最新 Docker 版本: {Colors.VALUE}{version}{Colors.RESET}", "NOTICE", "✓")
                 self.set_output('docker_version', version)
                 return version
         except Exception as e:
-            self.log(f"获取 Docker 版本失败: {e}", "ERROR")
+            self.log(f"获取 Docker 版本失败: {e}", "ERROR", "✗")
             return "27.4.1"
     
     def get_latest_compose_version(self):
         """获取最新的 Docker Compose 版本号"""
         try:
-            self.log("正在获取最新 Docker Compose 版本...")
+            self.log("正在获取最新 Docker Compose 版本...", "INFO", "🔍")
             url = "https://api.github.com/repos/docker/compose/releases/latest"
             req = urllib.request.Request(url)
             req.add_header('User-Agent', 'Mozilla/5.0')
@@ -174,11 +201,11 @@ class DockerUpdater:
             import re
             m = re.search(r'(\d+\.\d+\.\d+)', tag)
             version = m.group(1) if m else tag.lstrip('v')
-            self.log(f"找到最新 Docker Compose 版本: {version}", "NOTICE")
+            self.log(f"找到最新 Docker Compose 版本: {Colors.VALUE}{version}{Colors.RESET}", "NOTICE", "✓")
             self.set_output('compose_version', version)
             return version
         except Exception as e:
-            self.log(f"获取 Docker Compose 版本失败: {e}", "ERROR")
+            self.log(f"获取 Docker Compose 版本失败: {e}", "ERROR", "✗")
             return "2.32.4"
     
     def get_compose_asset_url(self, version, arch):
@@ -206,7 +233,7 @@ class DockerUpdater:
                         return url
             return None
         except Exception as e:
-            self.log(f"获取 Compose 资源失败: {e}", "ERROR")
+            self.log(f"获取 Compose 资源失败: {e}", "ERROR", "✗")
             return None
     
     def calculate_file_hash(self, filepath, algorithm='sha256'):
@@ -221,20 +248,20 @@ class DockerUpdater:
         """下载文件并显示进度，支持重试"""
         filepath = self.output_dir / filename
         
-        # 检查文件是否已存在（对所有文件类型都进行检查）
+        # 检查文件是否已存在
         if filepath.exists():
-            self.log(f"文件已存在，跳过下载: {filename}", "WARNING")
+            self.log(f"文件已存在，跳过下载: {Colors.KEY}{filename}{Colors.RESET}", "WARNING", "⊘")
             self.download_stats['skipped'] += 1
             return True
         
         for attempt in range(max_retries):
             try:
                 if attempt > 0:
-                    self.log(f"重试下载 ({attempt + 1}/{max_retries}): {description}")
+                    self.log(f"重试下载 ({attempt + 1}/{max_retries}): {description}", "INFO", "🔄")
                 else:
-                    self.log(f"开始下载 {description}...")
+                    self.log(f"开始下载 {description}...", "INFO", "📥")
                 
-                self.log(f"URL: {url}")
+                self.log(f"  → URL: {Colors.DIMMED}{url}{Colors.RESET}", "DEBUG", "")
                 
                 req = urllib.request.Request(url)
                 req.add_header('User-Agent', 'Mozilla/5.0')
@@ -257,22 +284,23 @@ class DockerUpdater:
                             if self.ci_mode and total_size > 0:
                                 if downloaded % (10 * 1024 * 1024) < block_size:
                                     percent = (downloaded / total_size) * 100
-                                    print(f"下载进度: {percent:.1f}% ({downloaded}/{total_size} bytes)")
-                            elif total_size > 0:
+                                    self.log(f"下载进度: {Colors.VALUE}{percent:.1f}%{Colors.RESET} ({downloaded}/{total_size} bytes)", "DEBUG", "📊")
+                            elif total_size > 0 and downloaded % (5 * 1024 * 1024) < block_size:
                                 percent = (downloaded / total_size) * 100
-                                print(f"\r下载进度: {percent:.1f}% ({downloaded}/{total_size} bytes)", end='')
+                                print(f"\r{Colors.DIMMED}  → 下载进度: {Colors.VALUE}{percent:.1f}%{Colors.RESET} ({Colors.VALUE}{downloaded}/{total_size}{Colors.RESET} bytes){Colors.RESET}", end='', flush=True)
                     
-                    if not self.ci_mode:
+                    if not self.ci_mode and total_size > 0:
                         print()  # 换行
                     
                     # 计算文件哈希
                     file_hash = self.calculate_file_hash(filepath)
                     file_size = filepath.stat().st_size
+                    file_size_mb = file_size / (1024 * 1024)
                     
-                    self.log(f"✓ {description} 下载完成", "NOTICE")
-                    self.log(f"  文件路径: {filepath}")
-                    self.log(f"  文件大小: {file_size / (1024*1024):.2f} MB")
-                    self.log(f"  SHA256: {file_hash}")
+                    self.log(f"{description} 下载完成", "SUCCESS", "✓")
+                    self.log(f"  → 文件路径: {Colors.VALUE}{filepath}{Colors.RESET}", "DEBUG", "")
+                    self.log(f"  → 文件大小: {Colors.VALUE}{file_size_mb:.2f} MB{Colors.RESET}", "DEBUG", "")
+                    self.log(f"  → SHA256: {Colors.DIMMED}{file_hash}{Colors.RESET}", "DEBUG", "")
                     
                     self.download_stats['success'] += 1
                     self.download_stats['total_size'] += file_size
@@ -280,20 +308,19 @@ class DockerUpdater:
                     return True
                     
             except urllib.error.HTTPError as e:
-                self.log(f"✗ HTTP 错误 {e.code}: {description}", "ERROR")
+                self.log(f"HTTP 错误 {e.code}: {description}", "ERROR", "✗")
                 if e.code == 404:
-                    # 404 错误不重试
                     self.download_stats['failed'] += 1
                     return False
             except Exception as e:
-                self.log(f"✗ 下载失败: {e}", "ERROR")
+                self.log(f"下载失败: {e}", "ERROR", "✗")
                 if filepath.exists():
-                    filepath.unlink()  # 删除不完整的文件
+                    filepath.unlink()
             
             if attempt < max_retries - 1:
                 import time
-                wait_time = 2 ** attempt  # 指数退避
-                self.log(f"等待 {wait_time} 秒后重试...")
+                wait_time = 2 ** attempt
+                self.log(f"等待 {Colors.VALUE}{wait_time}${Colors.RESET} 秒后重试...", "INFO", "⏳")
                 time.sleep(wait_time)
         
         self.download_stats['failed'] += 1
@@ -304,53 +331,50 @@ class DockerUpdater:
         try:
             import re
             
-            # 清理docker旧版本（只清理非当前版本的文件）
+            # 清理docker旧版本
             docker_pattern = f"docker-*-{arch}.tgz"
             docker_files = list(self.output_dir.glob(docker_pattern))
             for file in docker_files:
-                # 提取文件中的版本号: docker-VERSION-ARCH.tgz
                 match = re.match(r'docker-(\d+\.\d+\.\d+)-.+\.tgz', file.name)
                 if match:
                     file_version = match.group(1)
                     if file_version != current_docker_version:
                         file.unlink()
-                        self.log(f"已删除旧版本: {file.name}")
+                        self.log(f"已删除旧版本: {Colors.VALUE}{file.name}${Colors.RESET}", "DEBUG", "🗑️ ")
             
             # 清理docker-rootless-extras旧版本
             rootless_pattern = f"docker-rootless-extras-*-{arch}.tgz"
             rootless_files = list(self.output_dir.glob(rootless_pattern))
             for file in rootless_files:
-                # 提取文件中的版本号: docker-rootless-extras-VERSION-ARCH.tgz
                 match = re.match(r'docker-rootless-extras-(\d+\.\d+\.\d+)-.+\.tgz', file.name)
                 if match:
                     file_version = match.group(1)
                     if file_version != current_docker_version:
                         file.unlink()
-                        self.log(f"已删除旧版本: {file.name}")
+                        self.log(f"已删除旧版本: {Colors.VALUE}{file.name}${Colors.RESET}", "DEBUG", "🗑️ ")
             
             # 清理docker-compose旧版本
             compose_pattern = f"docker-compose-linux-*-{arch}"
             compose_files = list(self.output_dir.glob(compose_pattern))
             for file in compose_files:
-                # 提取文件中的版本号: docker-compose-linux-VERSION-ARCH
                 match = re.match(r'docker-compose-linux-(\d+\.\d+\.\d+)-.+', file.name)
                 if match:
                     file_version = match.group(1)
                     if file_version != current_compose_version:
                         file.unlink()
-                        self.log(f"已删除旧版本: {file.name}")
+                        self.log(f"已删除旧版本: {Colors.VALUE}{file.name}${Colors.RESET}", "DEBUG", "🗑️ ")
                     
         except Exception as e:
-            self.log(f"清理旧文件时出错: {e}", "ERROR")
+            self.log(f"清理旧文件时出错: {e}", "ERROR", "✗")
     
     def cleanup_logs(self, keep_count=3):
         try:
             logs = sorted(self.output_dir.glob("update_log_*.txt"), key=lambda x: x.stat().st_mtime, reverse=True)
             for old_log in logs[keep_count:]:
                 old_log.unlink()
-                self.log(f"已删除旧日志: {old_log.name}")
+                self.log(f"已删除旧日志: {Colors.VALUE}{old_log.name}${Colors.RESET}", "DEBUG", "🗑️ ")
         except Exception as e:
-            self.log(f"清理日志时出错: {e}", "ERROR")
+            self.log(f"清理日志时出错: {e}", "ERROR", "✗")
     
     def create_version_info(self, docker_version, compose_version):
         """创建版本信息文件"""
@@ -366,27 +390,28 @@ class DockerUpdater:
         with open(version_file, "w", encoding="utf-8") as f:
             json.dump(version_info, f, indent=2, ensure_ascii=False)
         
-        self.log(f"✓ 版本信息已保存: {version_file}")
+        self.log(f"版本信息已保存: {Colors.VALUE}{version_file}{Colors.RESET}", "SUCCESS", "✓")
     
     def create_checksums_file(self):
         """创建校验和文件"""
         checksums_file = self.output_dir / "SHA256SUMS"
         
         with open(checksums_file, 'w') as f:
-            # 计算所有二进制文件的校验和
             for file in sorted(self.output_dir.glob("*")):
                 if file.is_file() and file.suffix in ['.tgz', ''] and file.name != 'SHA256SUMS':
                     sha256 = self.calculate_file_hash(file)
                     f.write(f"{sha256}  {file.name}\n")
         
-        self.log(f"✓ 校验和文件已创建: {checksums_file}")
+        self.log(f"校验和文件已创建: {Colors.VALUE}{checksums_file}{Colors.RESET}", "SUCCESS", "✓")
         
     def download_for_architecture(self, arch, docker_version, compose_version):
         """为特定架构下载所有组件"""
         arch_info = self.arch_mapping[arch]
-        self.log(f"\n{'='*60}")
-        self.log(f"开始下载 {arch_info['display_name']} 架构文件", "NOTICE")
-        self.log(f"{'='*60}")
+        self.log("", "NOTICE", "")  # 空行
+        self.log("=" * 60, "NOTICE", "")
+        self.log(f"开始下载 {Colors.VALUE}{arch_info['display_name']}{Colors.RESET} 架构文件", "NOTICE", "📦")
+        self.log("=" * 60, "NOTICE", "")
+        self.log("", "NOTICE", "")  # 空行
         
         results = []
         
@@ -398,10 +423,9 @@ class DockerUpdater:
         )
         results.append(self.download_file(docker_url, docker_filename, f"Docker 二进制包 ({arch})"))
         
-        # 下载 Docker Compose (通过 GitHub Release assets)
+        # 下载 Docker Compose
         compose_asset_url = self.get_compose_asset_url(compose_version, arch_info['compose_arch'])
         if compose_asset_url:
-            # 使用带版本号的命名格式：docker-compose-linux-{version}-{arch}
             compose_filename = f"docker-compose-linux-{compose_version}-{arch}"
             if self.download_file(compose_asset_url, compose_filename, f"Docker Compose ({arch})"):
                 os.chmod(self.output_dir / compose_filename, 0o755)
@@ -420,11 +444,10 @@ class DockerUpdater:
         if self.download_file(rootless_url, rootless_filename, f"Docker Rootless Extras ({arch})"):
             results.append(True)
         else:
-            # 回退到该架构可用的最新 rootless 版本
             avail_rootless = self.list_rootless_versions(arch_info['docker_arch'])
             if avail_rootless:
                 fallback = avail_rootless[0]
-                self.log(f"Rootless Extras 版本 {docker_version} 不存在，{arch_info['display_name']} 回退到 {fallback}", "WARNING")
+                self.log(f"Rootless Extras 版本 {Colors.KEY}{docker_version}{Colors.RESET} 不存在，{Colors.VALUE}{arch_info['display_name']}{Colors.RESET} 回退到 {Colors.VALUE}{fallback}{Colors.RESET}", "WARNING", "⊘")
                 rootless_filename_fb = f"docker-rootless-extras-{fallback}-{arch}.tgz"
                 rootless_url_fb = self.rootless_url_template.format(
                     arch=arch_info['docker_arch'],
@@ -437,21 +460,26 @@ class DockerUpdater:
         success_count = sum(results)
         total_count = len(results)
         
-        self.log(f"{arch_info['display_name']} 架构下载完成: {success_count}/{total_count}", 
-                "NOTICE" if success_count == total_count else "WARNING")
+        status_icon = "✓" if success_count == total_count else "⚠️"
+        status_level = "NOTICE" if success_count == total_count else "WARNING"
+        self.log(f"{Colors.VALUE}{arch_info['display_name']}{Colors.RESET} 架构下载完成: {Colors.VALUE}{success_count}/{total_count}{Colors.RESET}", status_level, status_icon)
+        self.log("", "NOTICE", "")  # 空行
         
         return success_count, total_count
     
     def update(self):
         """执行更新流程"""
-        self.log("=" * 60)
-        self.log("开始 Docker 离线安装包更新流程", "NOTICE")
-        self.log(f"支持架构: {', '.join([self.arch_mapping[a]['display_name'] for a in self.architectures])}")
-        self.log("=" * 60)
+        self.log("", "NOTICE", "")
+        self.log("=" * 60, "NOTICE", "")
+        self.log("开始 Docker 离线安装包更新流程", "NOTICE", "🚀")
+        self.log(f"支持架构: {Colors.VALUE}{', '.join([self.arch_mapping[a]['display_name'] for a in self.architectures])}{Colors.RESET}", "INFO", "")
+        self.log("=" * 60, "NOTICE", "")
         
         # 获取最新版本号
         docker_version = self.get_latest_docker_version()
         compose_version = self.get_latest_compose_version()
+        
+        self.log("", "NOTICE", "")
         
         total_success = 0
         total_count = 0
@@ -477,17 +505,19 @@ class DockerUpdater:
         self.cleanup_logs(keep_count=3)
         
         # 总结
-        self.log("=" * 60)
-        self.log(f"更新完成! 成功: {total_success}/{total_count}", 
-                "NOTICE" if total_success == total_count else "WARNING")
-        self.log(f"下载统计:")
-        self.log(f"  - 成功: {self.download_stats['success']}")
-        self.log(f"  - 失败: {self.download_stats['failed']}")
-        self.log(f"  - 跳过: {self.download_stats['skipped']}")
-        self.log(f"  - 总大小: {self.download_stats['total_size'] / (1024*1024):.2f} MB")
-        self.log(f"输出目录: {self.output_dir.absolute()}")
-        self.log(f"日志文件: {self.log_file}")
-        self.log("=" * 60)
+        self.log("", "NOTICE", "")
+        self.log("=" * 60, "NOTICE", "")
+        status_icon = "✓" if total_success == total_count else "⚠️"
+        status_level = "NOTICE" if total_success == total_count else "WARNING"
+        self.log(f"更新完成! 成功: {Colors.VALUE}{total_success}{Colors.RESET}/{Colors.VALUE}{total_count}{Colors.RESET}", status_level, status_icon)
+        self.log("下载统计:", "INFO", "📊")
+        self.log(f"  → 成功: {Colors.VALUE}{self.download_stats['success']}{Colors.RESET}", "INFO", "")
+        self.log(f"  → 失败: {Colors.VALUE}{self.download_stats['failed']}{Colors.RESET}", "INFO", "")
+        self.log(f"  → 跳过: {Colors.VALUE}{self.download_stats['skipped']}{Colors.RESET}", "INFO", "")
+        self.log(f"  → 总大小: {Colors.VALUE}{self.download_stats['total_size'] / (1024*1024):.2f} MB{Colors.RESET}", "INFO", "")
+        self.log(f"输出目录: {Colors.VALUE}{self.output_dir.absolute()}{Colors.RESET}", "INFO", "")
+        self.log(f"日志文件: {Colors.VALUE}{self.log_file}{Colors.RESET}", "INFO", "")
+        self.log("=" * 60, "NOTICE", "")
         
         # 设置 GitHub Actions 输出
         self.set_output('success_count', str(total_success))
